@@ -413,11 +413,11 @@ GitHub Actions workflows in `.github/workflows/`:
 
 ## Commit & Pull Request Guidelines
 
+**Full maintainer PR workflow:** `.agents/skills/PR_WORKFLOW.md` -- triage order, quality bar, rebase rules, commit/changelog conventions, co-contributor policy, and the 3-step skill pipeline (`review-pr` > `prepare-pr` > `merge-pr`).
+
 - Create commits with `scripts/committer "<msg>" <file...>`; avoid manual `git add`/`git commit` so staging stays scoped.
 - Follow concise, action-oriented commit messages (e.g., `CLI: add verbose flag to send`).
 - Group related changes; avoid bundling unrelated refactors.
-- Changelog workflow: keep latest released version at top (no `Unreleased`); after publishing, bump version and start a new top section.
-- PRs should summarize scope, note testing performed, and mention any user-facing changes or new flags.
 - Read this when submitting a PR: `docs/help/submitting-a-pr.md` ([Submitting a PR](https://docs.openclaw.ai/help/submitting-a-pr))
 - Read this when submitting an issue: `docs/help/submitting-an-issue.md` ([Submitting an Issue](https://docs.openclaw.ai/help/submitting-an-issue))
 - PR review flow: when given a PR link, review via `gh pr view`/`gh pr diff` and do **not** change branches.
@@ -448,6 +448,7 @@ GitHub Actions workflows in `.github/workflows/`:
 - **Landing mode:** create an integration branch from `main`, bring in PR commits (**prefer rebase** for linear history; **merge allowed** when complexity/conflicts make it safer), apply fixes, add changelog (+ thanks + PR #), run full gate **locally before committing** (`pnpm build && pnpm check && pnpm test`), commit, merge back to `main`, then `git switch main` (never stay on a topic branch after landing). Important: contributor needs to be in git graph after this!
 
 ## Docs Linking (Mintlify)
+## Security & Configuration Tips
 
 - Docs are hosted on Mintlify (docs.openclaw.ai).
 - Internal doc links in `docs/**/*.md`: root-relative, no `.md`/`.mdx` (example: `[Config](/configuration)`).
