@@ -140,6 +140,174 @@ Embedded Claude-based coding agent with tool streaming, block streaming, model f
 
 `main` session for direct chats, group isolation, activation/queue modes, per-agent message history.
 
+### Request Data Flow
+
+The diagram below shows how a message flows through the system, from arrival to response delivery. Two entry paths converge on the same agent pipeline.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         ENTRY POINTS                                    │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  ┌──────────────┐  │
+│  │   Telegram    │  │   Discord    │  │   Slack    │  │  WhatsApp    │  │
+│  │  (grammY)     │  │ (discord.js) │  │  (Bolt)    │  │  (Baileys)   │  │
+│  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘  └──────┬───────┘  │
+│         │                 │                │                │          │
+│         ▼                 ▼                ▼                ▼          │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │              Channel Message Handler                             │  │
+│  │  src/{telegram,discord,slack,web}/bot-message*.ts                │  │
+│  │  • Parse platform-specific update into MsgContext                │  │
+│  │  • Resolve media (stickers, images, voice)                      │  │
+│  │  • Debounce / media-group assembly                              │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│  ┌──────────────┐  ┌───────┴──────┐  ┌──────────────────────────────┐  │
+│  │  macOS App   │  │  iOS / Android│  │  Control UI (Lit + Vite)    │  │
+│  │  (SwiftUI)   │  │  (Swift/     │  │  ui/                         │  │
+│  │              │  │   Kotlin)    │  │                              │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────┬───────────────┘  │
+│         │                 │                          │                 │
+│         ▼                 ▼                          ▼                 │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │              WebSocket Gateway                                   │  │
+│  │  src/gateway/server/ws-connection/message-handler.ts             │  │
+│  │  • Authenticate handshake (connect frame + token/pairing)       │  │
+│  │  • Route to handleGatewayRequest() by method name               │  │
+│  │  • chat.send → chat handler │ send → outbound │ agent → agent   │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+└─────────────────────────────┼──────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      ROUTING LAYER                                      │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Agent Route Resolution                                          │  │
+│  │  src/routing/resolve-route.ts :: resolveAgentRoute()             │  │
+│  │  Priority: peer binding → thread parent → guild → account →     │  │
+│  │            channel binding → default agent                       │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│  ┌──────────────────────────▼───────────────────────────────────────┐  │
+│  │  Session Key Resolution                                          │  │
+│  │  src/routing/ :: buildAgentSessionKey()                          │  │
+│  │  Key = agentId + channel + accountId + peer + dmScope            │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│  ┌──────────────────────────▼───────────────────────────────────────┐  │
+│  │  Session Lane Queue                                              │  │
+│  │  src/agents/pi-embedded-runner/lanes.ts                          │  │
+│  │  • One-at-a-time per session (prevents concurrent runs)         │  │
+│  │  • Global lane for cross-session concurrency limits             │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+└─────────────────────────────┼──────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MESSAGE PROCESSING                                   │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Reply Orchestrator                                              │  │
+│  │  src/auto-reply/reply/get-reply.ts :: getReplyFromConfig()       │  │
+│  │  1. initSessionState() — load/create session transcript         │  │
+│  │  2. Resolve directives (inline /think, /model commands)         │  │
+│  │  3. Apply media understanding (vision, link extraction)         │  │
+│  │  4. Build system prompt with group/channel context              │  │
+│  │  5. Snapshot skills for agent                                   │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│  ┌──────────────────────────▼───────────────────────────────────────┐  │
+│  │  Agent Runner                                                    │  │
+│  │  src/auto-reply/reply/agent-runner.ts :: runReplyAgent()         │  │
+│  │  • Manages typing indicators to channel                         │  │
+│  │  • Calls runAgentTurnWithFallback() (provider failover)         │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│  ┌──────────────────────────▼───────────────────────────────────────┐  │
+│  │  Pi Embedded Agent                                               │  │
+│  │  src/agents/pi-embedded-runner/run.ts :: runEmbeddedPiAgent()    │  │
+│  │  • Load SessionManager with transcript history                  │  │
+│  │  • Call Pi SDK with messages + tool definitions                 │  │
+│  │  • Stream tool calls → execute → return results                 │  │
+│  │  • Auto-compact on context overflow                             │  │
+│  │  • Auth profile rotation on rate limit                          │  │
+│  │  • Returns ReplyPayload[] (text + media)                        │  │
+│  └──────────────────────────┬───────────────────────────────────────┘  │
+│                             │                                          │
+│              ┌──────────────┼──────────────┐                           │
+│              ▼              ▼              ▼                            │
+│  ┌────────────────┐ ┌────────────┐ ┌────────────────┐                  │
+│  │  Tool Calls    │ │  Skills    │ │  Model Provider │                  │
+│  │  (bash, web,   │ │  (50+      │ │  (Anthropic,    │                  │
+│  │   file, etc.)  │ │  bundled)  │ │  OpenAI, etc.)  │                  │
+│  │  src/agents/   │ │  skills/   │ │  src/providers/ │                  │
+│  │  tools/        │ │            │ │                 │                  │
+│  └────────────────┘ └────────────┘ └────────────────┘                  │
+│                                                                         │
+└─────────────────────────────┬───────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    RESPONSE DELIVERY                                    │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Payload Formatter                                               │  │
+│  │  src/auto-reply/reply/agent-runner-payloads.ts                   │  │
+│  │  • Chunk text into channel-sized pieces (e.g. 4000 for TG)     │  │
+│  │  • Format markdown per channel capabilities                     │  │
+│  └───────────────┬──────────────────────────┬───────────────────────┘  │
+│                  │                          │                          │
+│     Channel Path │              WebSocket Path                        │
+│                  ▼                          ▼                          │
+│  ┌────────────────────────┐  ┌──────────────────────────────────────┐  │
+│  │  Channel Delivery      │  │  WebSocket Broadcast                 │  │
+│  │  src/{channel}/        │  │  src/gateway/server-chat.ts          │  │
+│  │  bot/delivery.ts       │  │  • emitChatDelta() — streaming      │  │
+│  │  • sendMessage()       │  │  • emitChatFinal() — complete       │  │
+│  │  • sendPhoto()         │  │  • broadcast("chat", payload)       │  │
+│  │  • Per-platform API    │  │  → All connected WS clients         │  │
+│  └────────┬───────────────┘  └──────────────┬───────────────────────┘  │
+│           │                                 │                          │
+│           ▼                                 ▼                          │
+│  ┌────────────────────┐          ┌──────────────────────┐              │
+│  │  Telegram / Discord│          │  macOS / iOS /       │              │
+│  │  Slack / WhatsApp  │          │  Android / Control UI│              │
+│  │  (user sees reply) │          │  (user sees reply)   │              │
+│  └────────────────────┘          └──────────────────────┘              │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Session Persistence                                             │  │
+│  │  ~/.openclaw/agents/<agentId>/sessions/*.jsonl                   │  │
+│  │  • Append user message + assistant response to transcript       │  │
+│  │  • Update usage stats (tokens, model, provider)                 │  │
+│  │  • Update session metadata                                      │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### WebSocket Protocol (native apps & Control UI)
+
+```
+Client                          Gateway
+  │                                │
+  │◄─── connect.challenge ─────────│  (nonce + timestamp)
+  │                                │
+  │──── req: connect ─────────────►│  (token/pairing auth)
+  │◄─── res: ok ──────────────────│
+  │                                │
+  │──── req: chat.send ──────────►│  (sessionKey + message)
+  │◄─── event: chat (delta) ──────│  (streaming chunks)
+  │◄─── event: chat (delta) ──────│
+  │◄─── event: chat (final) ──────│  (complete response)
+  │                                │
+  │──── req: chat.abort ─────────►│  (cancel running agent)
+  │◄─── res: ok ──────────────────│
+```
+
 ## Build, Test, and Development Commands
 
 - Runtime baseline: Node **22+** (keep Node + Bun paths working).
